@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ScreenClip</title>
+  <script src="capacitor.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 20px;
+      text-align: center;
+    }
+    h1 { color: #e94560; margin-bottom: 10px; }
+    p { color: #aaa; margin-bottom: 30px; }
+    .btn {
+      background: #e94560;
+      color: white;
+      border: none;
+      padding: 14px 32px;
+      border-radius: 8px;
+      font-size: 1rem;
+      cursor: pointer;
+      margin: 8px;
+      transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.9; }
+    .btn:disabled { background: #555; cursor: not-allowed; }
+    .btn.secondary { background: #16213e; border: 1px solid #0f3460; }
+    #status {
+      background: #16213e;
+      border: 1px solid #0f3460;
+      border-radius: 8px;
+      padding: 16px;
+      width: 90%;
+      max-width: 400px;
+      margin-bottom: 20px;
+      font-size: 0.95rem;
+    }
+    #log {
+      margin-top: 20px;
+      padding: 12px;
+      background: #0d1117;
+      border-radius: 8px;
+      width: 90%;
+      max-width: 400px;
+      max-height: 200px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 0.8rem;
+      color: #8b949e;
+      text-align: left;
+    }
+    .log-entry { margin-bottom: 4px; }
+    .log-ok { color: #3fb950; }
+    .log-err { color: #f85149; }
+    .log-info { color: #58a6ff; }
+  </style>
+</head>
+<body>
+  <h1>ScreenClip</h1>
+  <p>Remote screen capture</p>
+
+  <div id="status">Checking...</div>
+
+  <div>
+    <button class="btn" id="permBtn">📷 Grant Permission</button>
+    <button class="btn" id="capBtn" disabled>📸 Capture</button>
+    <button class="btn secondary" id="stopBtn" disabled>⏹ Stop</button>
+  </div>
+
+  <div id="log"></div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const capBtn = document.getElementById('capBtn');
+    const permBtn = document.getElementById('permBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const logEl = document.getElementById('log');
+
+    function log(msg, type = '') {
+      const el = document.createElement('div');
+      el.className = 'log-entry ' + (type ? 'log-' + type : '');
+      el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      logEl.appendChild(el);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    const ScreenCapture = Capacitor.Plugins.ScreenCapture;
+
+    if (!ScreenCapture) {
+      statusEl.textContent = 'Plugin not available';
+      log('ScreenCapture plugin not found', 'err');
+    } else {
+      // Check status on load
+      ScreenCapture.isMediaProjectionReady().then(res => {
+        log(`Plugin status: ready=${res.ready}`, 'info');
+        if (res.ready) {
+          statusEl.textContent = 'Ready — capture available';
+          capBtn.disabled = false;
+          stopBtn.disabled = false;
+        } else {
+          statusEl.textContent = 'Permission required';
+          permBtn.disabled = false;
+        }
+      }).catch(err => {
+        statusEl.textContent = 'Error: ' + (err.message || err);
+        log(err.message || err, 'err');
+      });
+
+      permBtn.addEventListener('click', () => {
+        log('Requesting permission...');
+        ScreenCapture.requestScreenCapturePermission();
+      });
+
+      capBtn.addEventListener('click', () => {
+        log('Capturing screenshot...');
+        ScreenCapture.capture().then(res => {
+          log('Capture initiated: ' + res.message, 'ok');
+        }).catch(err => {
+          log('Capture failed: ' + (err.message || err), 'err');
+        });
+      });
+
+      stopBtn.addEventListener('click', () => {
+        log('Stopping service...');
+        ScreenCapture.stop().then(() => {
+          log('Service stopped', 'ok');
+          statusEl.textContent = 'Service stopped';
+          capBtn.disabled = true;
+          stopBtn.disabled = true;
+          permBtn.disabled = false;
+        }).catch(err => {
+          log('Stop failed: ' + (err.message || err), 'err');
+        });
+      });
+    }
+  </script>
+</body>
+</html>

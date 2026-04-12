@@ -1,0 +1,14 @@
+{
+  "name": "screenclip-pc-server",
+  "version": "1.0.0",
+  "description": "PC server for ScreenClip — receives screenshots from Android and serves them to Electron",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "multer": "^2.1.1",
+    "cors": "^2.8.6"
+  }
+}

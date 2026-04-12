@@ -1,0 +1,14 @@
+{
+  "name": "screenclip-win",
+  "version": "1.0.0",
+  "description": "ScreenClip Windows desktop app",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "multer": "^2.1.1",
+    "cors": "^2.8.6"
+  }
+}
