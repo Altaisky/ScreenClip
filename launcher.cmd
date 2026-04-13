@@ -1,7 +1,4 @@
 @echo off
-if "%1"=="hid" goto :start
-mshta vbscript:createobject("wscript.shell").run("%~s0 hid",0)(window.close)&&exit
-:start
 set "SCRIPT_DIR=%~dp0"
 set "APP_DIR=%SCRIPT_DIR%.electron"
 set "ELECTRON_BIN=%APP_DIR%\node_modules\.bin\electron.cmd"
@@ -13,4 +10,4 @@ if not exist "%ELECTRON_BIN%" (
 )
 
 cd /d "%APP_DIR%"
-"%ELECTRON_BIN%" .
+start /B "" "%ELECTRON_BIN%" .

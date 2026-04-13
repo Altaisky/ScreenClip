@@ -3,122 +3,230 @@ const multer = require('multer');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
-const { exec } = require('child_process');
+const os = require('os');
+const crypto = require('crypto');
+const clipboard = require('./clipboard-monitor');
 
 const app = express();
 const PORT = 3000;
 
-app.use(cors());
+// Генерируем API ключ при запуске (или берём из переменной окружения)
+const API_KEY = process.env.SCREENCLIP_API_KEY || crypto.randomBytes(16).toString('hex');
+console.log(`API Key: ${API_KEY} (set SCREENCLIP_API_KEY env var to use a fixed key)`);
 
-// Хранилище скриншотов: id -> { path, timestamp }
-const screenshots = new Map();
-let screenshotCounter = 0;
-
-// Настройка multer — сохраняет файлы во временную папку
-const SCREENSHOT_DIR = path.join(__dirname, 'uploads');
-if (!fs.existsSync(SCREENSHOT_DIR)) {
-  fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+// ВАЖНО: API-ключ ОПЦИОНАЛЕН для локального использования.
+// Android-приложение пока не передаёт ключ, поэтому мы не блокируем запросы.
+// Ключ логируется для будущей настройки безопасности.
+function optionalApiKeyAuth(req, res, next) {
+  const providedKey = req.headers['x-api-key'] || req.query['api_key'];
+  if (providedKey) {
+    if (providedKey !== API_KEY) {
+      console.warn('[auth] Invalid API key provided');
+      // Не блокируем — просто логируем
+    } else {
+      console.log('[auth] Valid API key provided');
+    }
+  } else {
+    console.log('[auth] No API key provided (allowing for local use)');
+  }
+  next();
 }
 
+app.use(cors());
+
+// Временное хранилище для скриншота (только для передачи в clipboard)
+const TEMP_DIR = path.join(os.tmpdir(), 'screenclip-temp');
+if (!fs.existsSync(TEMP_DIR)) {
+  fs.mkdirSync(TEMP_DIR, { recursive: true });
+}
+
+// multer сохраняет во временный файл только для передачи в clipboard
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, SCREENSHOT_DIR),
+  destination: (req, file, cb) => cb(null, TEMP_DIR),
   filename: (req, file, cb) => {
-    screenshotCounter++;
-    const id = `shot_${screenshotCounter}_${Date.now()}`;
-    cb(null, id + '.png');
+    cb(null, `temp_${Date.now()}.png`);
   }
 });
 
-const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } });
-
-// POST /screenshot — загрузка скриншота с телефона
-app.post('/screenshot', upload.single('file'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'No file uploaded' });
+// Фильтр файлов — принимаем только изображения
+const fileFilter = (req, file, cb) => {
+  const allowedTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/bmp', 'image/webp'];
+  if (allowedTypes.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error(`Invalid file type: ${file.mimetype}. Only images are allowed.`), false);
   }
+};
 
-  const id = path.basename(req.file.filename, '.png');
-  screenshots.set(id, {
-    path: req.file.path,
-    timestamp: Date.now(),
-    size: req.file.size
-  });
-
-  console.log(`Screenshot saved: ${id} (${req.file.size} bytes)`);
-  res.json({ id, message: 'Screenshot uploaded successfully' });
-
-  // Автоматическое копирование в буфер обмена
-  copyToClipboard(req.file.path);
+const upload = multer({
+  storage,
+  fileFilter,
+  limits: {
+    fileSize: 50 * 1024 * 1024 // 50 MB
+  }
 });
 
-// GET /screenshot/:id — отдача скриншота (для Electron / буфера обмена)
-app.get('/screenshot/:id', (req, res) => {
-  const { id } = req.params;
-  const info = screenshots.get(id);
+// POST /screenshot — загрузка скриншота с телефона → сразу в буфер обмена
+app.post('/screenshot', optionalApiKeyAuth, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
 
-  if (!info) {
-    return res.status(404).json({ error: 'Screenshot not found' });
+    const filePath = req.file.path;
+    console.log(`Screenshot received (${req.file.size} bytes, ${req.file.mimetype}) — copying to clipboard...`);
+
+    // Копируем в буфер обмена
+    const success = await copyToClipboard(filePath);
+
+    // Удаляем временный файл сразу после копирования
+    try {
+      fs.unlinkSync(filePath);
+    } catch (e) {
+      console.warn('[warning] Could not delete temp file:', e.message);
+    }
+
+    if (success) {
+      console.log('Screenshot copied to clipboard successfully');
+      res.json({ message: 'Screenshot copied to clipboard' });
+    } else {
+      console.error('Failed to copy screenshot to clipboard');
+      res.status(500).json({ error: 'Failed to copy to clipboard' });
+    }
+  } catch (err) {
+    console.error('[error] /screenshot handler error:', err.message);
+    if (err.stack) console.error('[error] Stack:', err.stack);
+    res.status(500).json({ error: 'Internal server error' });
   }
-
-  if (!fs.existsSync(info.path)) {
-    screenshots.delete(id);
-    return res.status(404).json({ error: 'Screenshot file missing' });
-  }
-
-  res.sendFile(info.path);
 });
 
-// GET /screenshots — список всех скриншотов
-app.get('/screenshots', (req, res) => {
-  const list = [];
-  for (const [id, info] of screenshots.entries()) {
-    list.push({ id, timestamp: info.timestamp, size: info.size });
+// Глобальный обработчик ошибок multer
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'Invalid request body' });
   }
-  res.json(list);
-});
-
-// DELETE /screenshot/:id — удаление скриншота
-app.delete('/screenshot/:id', (req, res) => {
-  const { id } = req.params;
-  const info = screenshots.get(id);
-
-  if (!info) {
-    return res.status(404).json({ error: 'Screenshot not found' });
+  if (err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({ error: 'File too large. Maximum size: 50 MB' });
   }
-
-  if (fs.existsSync(info.path)) fs.unlinkSync(info.path);
-  screenshots.delete(id);
-  res.json({ message: 'Screenshot deleted' });
+  if (err.message && err.message.includes('Invalid file type')) {
+    return res.status(400).json({ error: err.message });
+  }
+  if (err) {
+    console.error('[error] Unhandled error:', err.message);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+  next();
 });
 
 // Автоматическое копирование скриншота в буфер обмена
-function copyToClipboard(filePath) {
-  const escapedPath = filePath.replace(/'/g, "''");
-  const ps = `Add-Type -AssemblyName System.Windows.Forms; $img = [System.Drawing.Image]::FromFile('${escapedPath}'); [System.Windows.Forms.Clipboard]::SetImage($img); $img.Dispose();`;
-  
-  exec(`powershell -Command "${ps}"`, (err) => {
-    if (err) {
-      console.error(`Clipboard error: ${err.message}`);
-    } else {
-      console.log(`Screenshot copied to clipboard`);
-    }
-  });
+async function copyToClipboard(filePath) {
+  clipboard.ignoreNextChange();
+  const success = await clipboard.copyImageToClipboard(filePath);
+  if (!success) {
+    clipboard.resetIgnoreNext();
+  }
+  return success;
 }
 
-// Очистка старыхых скриншотов старше 1 часа (каждые 10 минут)
-setInterval(() => {
-  const now = Date.now();
-  const ONE_HOUR = 60 * 60 * 1000;
-  for (const [id, info] of screenshots.entries()) {
-    if (now - info.timestamp > ONE_HOUR) {
-      if (fs.existsSync(info.path)) fs.unlinkSync(info.path);
-      screenshots.delete(id);
-      console.log(`Cleaned up old screenshot: ${id}`);
+// ВАЖНО: Мониторинг и автоочистка буфера ОТКЛЮЧЕНЫ по умолчанию.
+// Раньше буфер очищался через 1 сек после любого изменения,
+// что мешало пользователю копировать свои данные.
+// Скриншоты всё равно попадают в буфер — просто не очищаются автоматически.
+
+function startClipboardMonitoring() {
+  console.log('[clipboard] Auto-clear is DISABLED. Screenshots will stay in clipboard until you copy something else.');
+  // Если когда-нибудь понадобится включить автоочистку — раскомментируйте:
+  /*
+  if (clipboardMonitored) return;
+  clipboardMonitored = true;
+
+  clipboard.startMonitor(() => {
+    console.log('Clipboard change detected — scheduling clear...');
+    if (clearTimer) clearTimeout(clearTimer);
+    clearTimer = setTimeout(() => {
+      clipboard.clearClipboard();
+      console.log('Clipboard cleared');
+      clearTimer = null;
+    }, 5000); // 5 секунд — более разумный таймаут
+  });
+  */
+}
+
+// Очистка временных файлов при запуске (на случай если остались)
+function cleanupTempFiles() {
+  if (fs.existsSync(TEMP_DIR)) {
+    const files = fs.readdirSync(TEMP_DIR);
+    for (const file of files) {
+      try {
+        fs.unlinkSync(path.join(TEMP_DIR, file));
+      } catch (e) {
+        // игнорируем ошибки
+      }
     }
   }
-}, 10 * 60 * 1000);
+}
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Listening on all interfaces — accessible from local network`);
+  console.log(`Screenshots go directly to clipboard, no files saved permanently`);
+
+  // Очистка временных файлов
+  cleanupTempFiles();
+
+  // Компилируем и запускаем clipboard сервер с подробной обработкой ошибок
+  clipboard.compileHelper().then((ok) => {
+    if (ok) {
+      console.log('[clipboard] Starting clipboard server...');
+      return clipboard.startServer().then((started) => {
+        if (started) {
+          console.log('[clipboard] Clipboard server started, monitoring enabled');
+          startClipboardMonitoring();
+        } else {
+          console.error('[clipboard] WARNING: Clipboard server failed to start.');
+          console.error('[clipboard] Screenshots will be received but NOT copied to clipboard.');
+          console.error('[clipboard] Check that .NET Framework is installed and helper.exe can compile.');
+        }
+      });
+    } else {
+      console.error('[clipboard] WARNING: Helper.exe compilation failed.');
+      console.error('[clipboard] The server will run but clipboard functionality will be disabled.');
+      console.error('[clipboard] To fix: ensure .NET Framework 4.x is installed and clipboard-helper.cs exists.');
+    }
+  }).catch((e) => {
+    console.error('[clipboard] Unexpected error during initialization:', e.message);
+    if (e.stack) console.error('[clipboard] Stack:', e.stack);
+  });
+});
+
+// Graceful shutdown — обработка SIGTERM и сообщений от Electron
+function gracefulShutdown() {
+  console.log('[server] Shutting down gracefully...');
+  clipboard.stopMonitor();
+  clipboard.stopServer();
+  process.exit(0);
+}
+
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
+
+// Electron fork — слушаем команды управления
+if (process.send) {
+  process.on('message', (msg) => {
+    if (msg.cmd === 'shutdown') {
+      gracefulShutdown();
+    }
+  });
+}
+
+// Глобальная обработка ошибок — чтобы сервер не падал полностью
+process.on('uncaughtException', (err) => {
+  console.error('[server] Uncaught exception:', err.message);
+  if (err.stack) console.error('[server] Stack:', err.stack);
+  // Не завершаем процесс — логируем и продолжаем работу
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[server] Unhandled rejection at:', promise, 'reason:', reason);
+  // Не завершаем процесс — логируем и продолжаем работу
 });

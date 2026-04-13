@@ -25,6 +25,10 @@ ios/
 pc-server/uploads/*
 !pc-server/uploads/.gitkeep
 
+# Compiled clipboard helper (only ignore compiled exe, not source)
+pc-server/clipboard-helper.exe
+pc-server/clipboard-helper-src.cs
+
 # Electron
 .electron/node_modules/
 

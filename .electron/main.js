@@ -2,14 +2,32 @@ const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage } = require('electr
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { networkInterfaces } = require('os');
 
 let mainWindow;
 let tray = null;
 let serverProcess = null;
 let isServerRunning = false;
 
+/** Получить первый не внутренний IPv4 адрес (локальная сеть) */
+function getLocalIP() {
+  const nets = networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      // Пропускаем внутренние и не-IPv4 адреса
+      if (!net.internal && net.family === 'IPv4') {
+        return net.address;
+      }
+    }
+  }
+  return '127.0.0.1'; // fallback
+}
+
 const SERVER_DIR = path.join(__dirname, '..', 'pc-server');
 const SERVER_SCRIPT = path.join(SERVER_DIR, 'index.js');
+
+// API key для общения с сервером
+const SERVER_API_KEY = process.env.SCREENCLIP_API_KEY || require('crypto').randomBytes(16).toString('hex');
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -36,6 +54,7 @@ function createTray() {
     { label: 'Открыть', click: () => mainWindow.show() },
     { label: 'Перезапустить сервер', click: restartServer },
     { type: 'separator' },
+    { label: 'Принудительная остановка', click: forceStopAll },
     { label: 'Выйти', click: () => { if (serverProcess) serverProcess.kill(); app.quit(); }}
   ]);
   tray.setToolTip('ScreenClip Server');
@@ -46,10 +65,16 @@ function createTray() {
 function startServer() {
   if (isServerRunning) return;
   const { fork } = require('child_process');
-  serverProcess = fork(SERVER_SCRIPT, [], { cwd: SERVER_DIR, stdio: 'pipe', windowsHide: true });
+  serverProcess = fork(SERVER_SCRIPT, [], {
+    cwd: SERVER_DIR,
+    stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+    windowsHide: true,
+    env: { ...process.env, SCREENCLIP_API_KEY: SERVER_API_KEY }
+  });
 
   serverProcess.stdout.on('data', (data) => {
-    if (data.toString().includes('Server is running')) {
+    const msg = data.toString();
+    if (msg.includes('Server is running')) {
       isServerRunning = true;
       if (mainWindow) mainWindow.webContents.send('server-status', { status: 'running', message: 'Сервер запущен' });
       if (tray) tray.setToolTip('ScreenClip: Сервер запущен');
@@ -63,10 +88,77 @@ function startServer() {
     if (mainWindow) mainWindow.webContents.send('server-status', { status: 'stopped', message: 'Сервер остановлен (код ' + code + ')' });
     if (tray) tray.setToolTip('ScreenClip: Сервер остановлен');
   });
+  serverProcess.on('error', (err) => {
+    if (mainWindow) mainWindow.webContents.send('server-status', { status: 'error', message: 'Ошибка сервера: ' + err.message });
+  });
   if (mainWindow) mainWindow.webContents.send('server-status', { status: 'starting', message: 'Запуск сервера...' });
 }
 
-function stopServer() { if (serverProcess) { serverProcess.kill(); serverProcess = null; } isServerRunning = false; }
+function stopServer() {
+  if (!serverProcess) { isServerRunning = false; return; }
+  try {
+    // Пробуем graceful shutdown
+    if (serverProcess.connected) {
+      serverProcess.send({ cmd: 'shutdown' });
+    }
+    // Ждём 1 сек, затем kill
+    setTimeout(() => {
+      if (serverProcess && !serverProcess.killed) {
+        try { serverProcess.kill('SIGTERM'); } catch (e) {}
+      }
+    }, 1000);
+  } catch (e) {
+    // Если что-то пошло не так — жёстко убиваем
+    try { serverProcess.kill('SIGKILL'); } catch (e) {}
+  }
+  serverProcess = null;
+  isServerRunning = false;
+}
+
+/** Принудительная остановка: убивает ТОЛЬКО наш сервер и clipboard-helper */
+function forceStopAll() {
+  console.log('[force-stop] Stopping only ScreenClip processes...');
+
+  // Останавливаем НАШ серверный процесс (который мы сами fork'нули)
+  if (serverProcess && !serverProcess.killed) {
+    try {
+      if (serverProcess.connected) {
+        serverProcess.send({ cmd: 'shutdown' });
+      }
+      serverProcess.kill('SIGKILL');
+      console.log('[force-stop] Our server process killed');
+    } catch (e) {
+      console.log('[force-stop] Error killing server process:', e.message);
+    }
+  }
+
+  serverProcess = null;
+  isServerRunning = false;
+
+  // Убиваем ТОЛЬКО clipboard-helper.exe от НАШЕГО сервера
+  const { exec } = require('child_process');
+  exec('taskkill /F /IM clipboard-helper.exe 2>nul', (err) => {
+    if (err && err.code !== 128) {
+      console.log('[force-stop] Error killing clipboard-helper.exe:', err.message);
+    } else {
+      console.log('[force-stop] clipboard-helper.exe killed');
+    }
+  });
+
+  // ВАЖНО: НЕ ищем и НЕ убиваем другие node.exe процессы!
+  // Раньше использовался wmic для поиска процессов по командной строке,
+  // что могло случайно убить посторонние Node.js приложения.
+
+  if (mainWindow) {
+    mainWindow.webContents.send('server-status', {
+      status: 'stopped',
+      message: 'Все процессы ScreenClip остановлены'
+    });
+  }
+  if (tray) {
+    tray.setToolTip('ScreenClip: Остановлено принудительно');
+  }
+}
 function restartServer() { stopServer(); setTimeout(startServer, 1000); }
 
 app.whenReady().then(() => { createWindow(); createTray(); });
@@ -77,6 +169,9 @@ ipcMain.handle('get-server-status', () => ({ isRunning: isServerRunning }));
 ipcMain.handle('start-server', () => { startServer(); return true; });
 ipcMain.handle('stop-server', () => { stopServer(); return true; });
 ipcMain.handle('restart-server', () => { restartServer(); return true; });
+ipcMain.handle('force-stop-all', () => { forceStopAll(); return true; });
+ipcMain.handle('get-local-ip', () => getLocalIP());
+ipcMain.handle('get-api-key', () => SERVER_API_KEY);
 
 ipcMain.handle('copy-to-clipboard', async (event, screenshotId) => {
   try {
