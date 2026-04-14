@@ -12,7 +12,6 @@ const PORT = 3000;
 
 // Генерируем API ключ при запуске (или берём из переменной окружения)
 const API_KEY = process.env.SCREENCLIP_API_KEY || crypto.randomBytes(16).toString('hex');
-console.log(`API Key: ${API_KEY} (set SCREENCLIP_API_KEY env var to use a fixed key)`);
 
 // ВАЖНО: API-ключ ОПЦИОНАЛЕН для локального использования.
 // Android-приложение пока не передаёт ключ, поэтому мы не блокируем запросы.
@@ -39,6 +38,13 @@ const TEMP_DIR = path.join(os.tmpdir(), 'screenclip-temp');
 if (!fs.existsSync(TEMP_DIR)) {
   fs.mkdirSync(TEMP_DIR, { recursive: true });
 }
+
+// Хранение последнего скриншота для превью в Electron
+let lastScreenshot = {
+  data: null,       // Buffer с данными изображения
+  timestamp: null,  // Время получения
+  size: 0           // Размер в байтах
+};
 
 // multer сохраняет во временный файл только для передачи в clipboard
 const storage = multer.diskStorage({
@@ -76,28 +82,61 @@ app.post('/screenshot', optionalApiKeyAuth, upload.single('file'), async (req, r
     const filePath = req.file.path;
     console.log(`Screenshot received (${req.file.size} bytes, ${req.file.mimetype}) — copying to clipboard...`);
 
+    // Сохраняем данные для превью (до удаления файла)
+    try {
+      lastScreenshot.data = fs.readFileSync(filePath);
+      lastScreenshot.timestamp = Date.now();
+      lastScreenshot.size = req.file.size;
+    } catch (e) {
+      console.error('[preview] Failed to read file:', e.message);
+    }
+
     // Копируем в буфер обмена
     const success = await copyToClipboard(filePath);
 
-    // Удаляем временный файл сразу после копирования
-    try {
-      fs.unlinkSync(filePath);
-    } catch (e) {
-      console.warn('[warning] Could not delete temp file:', e.message);
-    }
-
     if (success) {
+      // Удаляем временный файл ТОЛЬКО после успешного копирования
+      try {
+        fs.unlinkSync(filePath);
+      } catch (e) {
+        console.warn('Could not delete temp file:', e.message);
+      }
       console.log('Screenshot copied to clipboard successfully');
       res.json({ message: 'Screenshot copied to clipboard' });
     } else {
-      console.error('Failed to copy screenshot to clipboard');
-      res.status(500).json({ error: 'Failed to copy to clipboard' });
+      console.error('Failed to copy screenshot to clipboard (preview saved)');
+      // Возвращаем 200 — превью всё равно работает
+      res.json({ message: 'Screenshot saved (clipboard failed)', warning: 'Clipboard copy failed' });
     }
   } catch (err) {
     console.error('[error] /screenshot handler error:', err.message);
     if (err.stack) console.error('[error] Stack:', err.stack);
     res.status(500).json({ error: 'Internal server error' });
   }
+});
+
+// GET /screenshot-info — метаданные последнего скриншота
+app.get('/screenshot-info', (req, res) => {
+  if (!lastScreenshot || !lastScreenshot.data) {
+    return res.json({ hasScreenshot: false });
+  }
+  res.json({
+    hasScreenshot: true,
+    timestamp: lastScreenshot.timestamp,
+    size: lastScreenshot.size
+  });
+});
+
+// GET /latest-screenshot — отдаёт последний скриншот (base64)
+app.get('/latest-screenshot', (req, res) => {
+  if (!lastScreenshot || !lastScreenshot.data) {
+    return res.status(404).json({ error: 'No screenshot available' });
+  }
+  res.json({
+    data: lastScreenshot.data.toString('base64'),
+    timestamp: lastScreenshot.timestamp,
+    size: lastScreenshot.size
+  });
 });
 
 // Глобальный обработчик ошибок multer
@@ -174,7 +213,7 @@ app.listen(PORT, '0.0.0.0', () => {
   // Очистка временных файлов
   cleanupTempFiles();
 
-  // Компилируем и запускаем clipboard сервер с подробной обработкой ошибок
+  // Компилируем и запускаем clipboard сервер
   clipboard.compileHelper().then((ok) => {
     if (ok) {
       console.log('[clipboard] Starting clipboard server...');
@@ -212,6 +251,9 @@ process.on('SIGINT', gracefulShutdown);
 
 // Electron fork — слушаем команды управления
 if (process.send) {
+  // Сообщаем Electron'у что сервер готов
+  process.send({ type: 'server-status', status: 'running', message: 'Сервер запущен' });
+  
   process.on('message', (msg) => {
     if (msg.cmd === 'shutdown') {
       gracefulShutdown();

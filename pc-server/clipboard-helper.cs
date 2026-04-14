@@ -87,45 +87,75 @@ namespace ScreenClipClipboardHelper
         {
             lock (clipboardLock)
             {
-                // Убираем кавычки если есть
                 filePath = filePath.Trim('"', '\'', '^');
 
-                if (!File.Exists(filePath))
+                // Ждём, пока Node.js отпустит файл (рейс кондишн в Windows)
+                for (int i = 0; i < 5; i++)
                 {
-                    Console.WriteLine("ERROR: File not found: " + filePath);
-                    return;
+                    if (File.Exists(filePath)) break;
+                    Thread.Sleep(50);
                 }
 
                 try
                 {
-                    // Читаем файл в память — это освобождает файловый дескриптор
-                    byte[] fileBytes = File.ReadAllBytes(filePath);
-
-                    using (MemoryStream ms = new MemoryStream(fileBytes))
-                    using (Image image = Image.FromStream(ms))
+                    byte[] fileBytes = null;
+                    // Пытаемся прочитать файл с повторами
+                    for (int i = 0; i < 5; i++)
                     {
-                        // Создаём копи изображения для буфера
-                        Bitmap clipboardImage = new Bitmap(image);
-
                         try
                         {
-                            Clipboard.SetImage(clipboardImage);
-                            Console.WriteLine("OK");
+                            fileBytes = File.ReadAllBytes(filePath);
+                            break;
                         }
-                        catch (ExternalException ex)
+                        catch (IOException)
                         {
-                            Console.WriteLine("ERROR: Clipboard access failed: " + ex.Message);
-                            clipboardImage.Dispose();
-                            return;
+                            Thread.Sleep(100); // Ждём разблокировки
                         }
+                    }
 
-                        clipboardImage.Dispose();
+                    if (fileBytes != null)
+                    {
+                        ProcessImageBytes(fileBytes);
+                    }
+                    else
+                    {
+                        Console.WriteLine("ERROR: Could not read file after retries");
                     }
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine("ERROR: " + ex.Message);
                 }
+            }
+        }
+
+        static void ProcessImageBytes(byte[] imageBytes)
+        {
+            try
+            {
+                using (MemoryStream ms = new MemoryStream(imageBytes))
+                using (Image image = Image.FromStream(ms))
+                {
+                    Bitmap clipboardImage = new Bitmap(image);
+
+                    try
+                    {
+                        Clipboard.SetImage(clipboardImage);
+                        Console.WriteLine("OK");
+                    }
+                    catch (ExternalException ex)
+                    {
+                        Console.WriteLine("ERROR: Clipboard access failed: " + ex.Message);
+                        clipboardImage.Dispose();
+                        return;
+                    }
+
+                    clipboardImage.Dispose();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("ERROR: " + ex.Message);
             }
         }
 

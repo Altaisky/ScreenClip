@@ -31,9 +31,13 @@ const SERVER_API_KEY = process.env.SCREENCLIP_API_KEY || require('crypto').rando
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 400,
-    height: 300,
-    webPreferences: { nodeIntegration: true, contextIsolation: false },
+    width: 420,
+    height: 600,
+    webPreferences: { 
+      nodeIntegration: true, 
+      contextIsolation: false,
+      webSecurity: false // Разрешаем HTTP-запросы к localhost:3000
+    },
     resizable: false,
     icon: path.join(__dirname, 'icon.png')
   });
@@ -78,6 +82,13 @@ function startServer() {
       isServerRunning = true;
       if (mainWindow) mainWindow.webContents.send('server-status', { status: 'running', message: 'Сервер запущен' });
       if (tray) tray.setToolTip('ScreenClip: Сервер запущен');
+    }
+  });
+  
+  // Обработка IPC-сообщений от сервера
+  serverProcess.on('message', (msg) => {
+    if (msg.type === 'server-status' && mainWindow) {
+      mainWindow.webContents.send('server-status', { status: msg.status, message: msg.message });
     }
   });
   serverProcess.stderr.on('data', (data) => {
@@ -191,5 +202,65 @@ ipcMain.handle('copy-to-clipboard', async (event, screenshotId) => {
     req.on('error', () => {});
     req.end();
     return true;
+  } catch (e) { return false; }
+});
+
+// Получить последний скриншот (base64)
+ipcMain.handle('get-latest-screenshot', async () => {
+  try {
+    const http = require('http');
+    return new Promise((resolve) => {
+      http.get('http://localhost:3000/latest-screenshot', (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          try {
+            const data = JSON.parse(Buffer.concat(chunks).toString());
+            resolve(data);
+          } catch (e) {
+            resolve(null);
+          }
+        });
+      }).on('error', () => resolve(null));
+    });
+  } catch (e) { return null; }
+});
+
+// Получить метаданные последнего скриншота
+ipcMain.handle('get-screenshot-info', async () => {
+  try {
+    const http = require('http');
+    return new Promise((resolve) => {
+      http.get('http://localhost:3000/screenshot-info', (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          try {
+            const data = JSON.parse(Buffer.concat(chunks).toString());
+            resolve(data);
+          } catch (e) {
+            resolve(null);
+          }
+        });
+      }).on('error', () => resolve(null));
+    });
+  } catch (e) { return null; }
+});
+
+// Сохранить скриншот на диск
+ipcMain.handle('save-screenshot', async (event, base64Data) => {
+  try {
+    const { dialog } = require('electron');
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Сохранить скриншот',
+      defaultPath: `screenclip-${Date.now()}.png`,
+      filters: [{ name: 'PNG', extensions: ['png'] }]
+    });
+
+    if (!result.canceled && result.filePath) {
+      fs.writeFileSync(result.filePath, Buffer.from(base64Data, 'base64'));
+      return true;
+    }
+    return false;
   } catch (e) { return false; }
 });

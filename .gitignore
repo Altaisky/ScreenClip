@@ -28,6 +28,7 @@ pc-server/uploads/*
 # Compiled clipboard helper (only ignore compiled exe, not source)
 pc-server/clipboard-helper.exe
 pc-server/clipboard-helper-src.cs
+pc-server/server-debug.log
 
 # Electron
 .electron/node_modules/

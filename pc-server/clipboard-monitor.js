@@ -191,13 +191,13 @@ function sendCommand(cmd) {
       serverProcess.stdin.cork();
       setTimeout(() => serverProcess.stdin.uncork(), 10);
 
-      // Timeout — 5 секунд на ответ (было 2)
+      // Timeout — 10 секунд на ответ (увеличено для copy операций)
       timeoutId = setTimeout(() => {
         serverProcess.stdout.removeListener('data', onData);
-        console.warn('[clipboard] Command timeout:', cmd, '(5s)');
+        console.warn('[clipboard] Command timeout:', cmd, '(10s)');
         console.warn('[clipboard] Server process state:', serverProcess ? `pid=${serverProcess.pid}, killed=${serverProcess.killed}, connected=${serverProcess.connected}` : 'null');
         resolve(null);
-      }, 5000);
+      }, 10000);
     } catch (err) {
       console.error('[clipboard] sendCommand error:', err.message);
       resolve(null);
@@ -216,10 +216,25 @@ async function getClipboardSequence() {
 }
 
 /**
- * Копирует изображение в буфер.
+ * Копирует изображение в буфер (передаёт путь к файлу).
  */
 async function copyImageToClipboard(filePath) {
+  console.log('[clipboard] copyImageToClipboard called with:', filePath);
+  console.log('[clipboard] Server process alive:', serverProcess && !serverProcess.killed);
+  console.log('[clipboard] File exists:', fs.existsSync(filePath));
+  
+  if (!serverProcess || serverProcess.killed) {
+    console.error('[clipboard] ERROR: Server process is dead, cannot copy to clipboard');
+    return false;
+  }
+  
+  if (!fs.existsSync(filePath)) {
+    console.error('[clipboard] ERROR: File does not exist:', filePath);
+    return false;
+  }
+
   const result = await sendCommand('copy ' + filePath);
+  console.log('[clipboard] copyImageToClipboard result:', result);
   return result === 'OK';
 }
 
